@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import os as os
 
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.pipeline import Pipeline
@@ -16,22 +17,32 @@ from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 df_train = pd.read_csv("./data/processed_train.csv")
 df_test = pd.read_csv("./data/processed_test.csv")
 
-print(df_train.shape)  # Should still be ~29k rows
-print(df_test.shape)   # Should match original test file
-print(df_train.head())  # Verify features look right
+print(df_train.shape)  # ~29k rows
+print(df_test.shape)   
+print(df_train.head())  
 
 # Define features and label
 label_col = "binary_label_cutoff_1"
 text_col = "reviewText"
 numeric_cols = [
-    "vote", "verified", "review_length", "num_words", "reviewer_freq",
-    "review_hour", "review_weekday", "review_days_since",
+    "vote", "verified", "review_length", "num_words", "avg_word_length",
+    "uppercase_ratio", "exclamation_count", "reviewer_freq",
+    "review_year", "review_month", "review_day", "review_dayofweek", "review_hour",
     "pos_count", "neg_count", "polarity_score"
 ]
 cat_cols = ["category"]
 
 # Drop any rows with missing target label
 df_train = df_train.dropna(subset=[label_col])
+
+# fill any empty values with empty string
+df_train["reviewText"] = df_train["reviewText"].fillna("")
+df_test["reviewText"] = df_test["reviewText"].fillna("")
+df_train["summary"] = df_train["summary"].fillna("")
+df_test["summary"] = df_test["summary"].fillna("")
+df_train["category"] = df_train["category"].fillna("")
+df_test["category"] = df_test["category"].fillna("")
+df_train["vote"] = df_train["vote"].fillna(0)
 
 # Define X and y
 X = df_train.drop(columns=[label_col])
@@ -43,9 +54,16 @@ X_train, X_val, y_train, y_val = train_test_split(
 )
 
 # Define preprocessing
+
+# text_pipeline = Pipeline([
+#     ("tfidf", TfidfVectorizer(max_features=12000, ngram_range=(1,2), stop_words="english")),
+#     ("svd", TruncatedSVD(n_components=250, random_state=42))
+# ])
+
+# Update Truncated SVD (dimensionality reduction)
 text_pipeline = Pipeline([
-    ("tfidf", TfidfVectorizer(max_features=12000, ngram_range=(1,2), stop_words="english")),
-    ("svd", TruncatedSVD(n_components=250, random_state=42))
+    ("tfidf", TfidfVectorizer(max_features=12000, ngram_range=(1,3), stop_words="english")),
+    ("svd", TruncatedSVD(n_components=170, random_state=42))  # best previous SVD value
 ])
 
 numeric_pipeline = Pipeline([
@@ -59,9 +77,9 @@ preprocessor = ColumnTransformer([
 ])
 
 # Define stacking classifier
-base_lr = LogisticRegression(solver="saga", class_weight="balanced", max_iter=3000, random_state=42)
-base_rf = RandomForestClassifier(n_estimators=80, max_depth=12, class_weight="balanced_subsample", random_state=42)
-base_gb = GradientBoostingClassifier(n_estimators=80, learning_rate=0.05, max_depth=3, random_state=42)
+base_lr = LogisticRegression(solver="saga", penalty="l2", class_weight="balanced", max_iter=3000, C=0.1596, random_state=42)
+base_rf = RandomForestClassifier(n_estimators=114, max_depth=12, class_weight="balanced_subsample", random_state=42)
+base_gb = GradientBoostingClassifier(n_estimators=138, learning_rate=0.2666, max_depth=5, random_state=42)
 
 stack_ensemble = StackingClassifier(
     estimators=[
@@ -69,10 +87,11 @@ stack_ensemble = StackingClassifier(
         ("rf", base_rf),
         ("gb", base_gb)
     ],
-    final_estimator=LogisticRegression(solver="lbfgs", class_weight="balanced", max_iter=3000, random_state=42),
-    passthrough=True,
-    cv=5,
-    n_jobs=-1
+    final_estimator=LogisticRegression(
+        solver="saga", penalty="l2", class_weight="balanced", max_iter=3000, 
+        C=0.1596, random_state=42  # switching to saga 
+    ),
+    passthrough=True, cv=3, n_jobs=-1, verbose=2
 )
 
 # Define final pipeline
@@ -97,6 +116,11 @@ print("\n=== VALIDATION METRICS ===")
 print(f"Macro F1 : {val_f1:.4f}")
 print(f"Accuracy : {val_acc:.4f}")
 print(f"ROC AUC  : {val_auc:.4f}")
+
+# Fill missing values
+df_test[text_col] = df_test[text_col].fillna("")  # Fill missing text values with empty string
+for col in numeric_cols:
+    df_test[col] = df_test[col].fillna(0)  # Fill NaNs in numeric columns with 0
 
 # Predict on test set
 y_test_pred = final_pipeline.predict(df_test)
