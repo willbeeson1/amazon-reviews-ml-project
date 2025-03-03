@@ -30,8 +30,17 @@ from skopt.space import Real, Integer, Categorical
 ###############################################################################
 # 1. Load Data
 ###############################################################################
-df_train = pd.read_csv("./data/Training.csv")
-df_test  = pd.read_csv("./data/Test.csv")
+train_path = "./data/Training.csv"
+test_path = "./data/Test.csv"
+
+# Verify that the files exist
+if not os.path.exists(train_path):
+    raise FileNotFoundError(f"❌ Error: Training file not found at {train_path}")
+if not os.path.exists(test_path):
+    raise FileNotFoundError(f"❌ Error: Test file not found at {test_path}")
+
+df_train = pd.read_csv(train_path)
+df_test  = pd.read_csv(test_path)
 
 print("\n[INFO] df_train columns:", df_train.columns.tolist())
 print("[INFO] df_test columns: ", df_test.columns.tolist())
@@ -392,6 +401,6 @@ df_test["binary_split_1"] = df_test_pred
 os.makedirs("results", exist_ok=True)
 df_test["id"] = df_test.index
 
-out_path = "results/submission_bayes_ngram.csv"
+out_path = "results/submission_bayes_ngram_03_02_17_52.csv"
 df_test[["id","binary_split_1"]].to_csv(out_path, index=False)
 print(f"\n🎉 DONE. Kaggle submission => {out_path}")
