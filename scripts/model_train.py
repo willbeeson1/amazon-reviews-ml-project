@@ -1,3 +1,4 @@
+# /scripts/model_train.py
 import pandas as pd
 import numpy as np
 import os as os
@@ -12,6 +13,9 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, StackingClassifier
 from sklearn.svm import SVC
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from joblib import Parallel, delayed
+from scipy.sparse import vstack
+
 
 # check for the processed data  
 df_train = pd.read_csv("./data/processed_train.csv")
@@ -44,6 +48,44 @@ df_train["category"] = df_train["category"].fillna("")
 df_test["category"] = df_test["category"].fillna("")
 df_train["vote"] = df_train["vote"].fillna(0)
 
+# Parallel TF-IDF processing function
+def parallel_tfidf(texts):
+    vectorizer = TfidfVectorizer(
+        max_features=12000,
+        ngram_range=(1,3),
+        stop_words="english"
+    )
+    return vectorizer.fit_transform(texts)
+
+# Apply parallel processing to reviewText
+text_chunks = np.array_split(df_train["reviewText"].tolist(), 8)  # Split into 8 chunks
+tfidf_results = Parallel(n_jobs=-1)(delayed(parallel_tfidf)(chunk) for chunk in text_chunks)
+
+# Combine results
+tfidf_matrix = vstack(tfidf_results)
+
+# Use TruncatedSVD after TF-IDF
+svd = TruncatedSVD(n_components=170, random_state=42)
+X_text = svd.fit_transform(tfidf_matrix)
+
+# Replace original reviewText column with processed features
+df_train_svd = pd.DataFrame(X_text, index=df_train.index)
+df_train = df_train.drop(columns=["reviewText"]).join(df_train_svd)
+
+# ✅ Process TF-IDF for TEST SET using the same vectorizer and SVD
+text_chunks_test = np.array_split(df_test["reviewText"].tolist(), 8)  # Split into 8 chunks
+tfidf_results_test = Parallel(n_jobs=-1)(delayed(parallel_tfidf)(chunk) for chunk in text_chunks_test)
+tfidf_matrix_test = vstack(tfidf_results_test)
+
+# Apply TruncatedSVD to test set
+X_text_test = svd.transform(tfidf_matrix_test)
+df_test_svd = pd.DataFrame(X_text_test, index=df_test.index)
+df_test = df_test.drop(columns=["reviewText"]).join(df_test_svd)
+
+# Convert all column names to strings to avoid Scikit-Learn errors
+df_train.columns = df_train.columns.astype(str)
+df_test.columns = df_test.columns.astype(str)
+
 # Define X and y
 X = df_train.drop(columns=[label_col])
 y = df_train[label_col].values
@@ -53,33 +95,33 @@ X_train, X_val, y_train, y_val = train_test_split(
     X, y, test_size=0.2, stratify=y, random_state=42
 )
 
-# Define preprocessing
-
-# text_pipeline = Pipeline([
-#     ("tfidf", TfidfVectorizer(max_features=12000, ngram_range=(1,2), stop_words="english")),
-#     ("svd", TruncatedSVD(n_components=250, random_state=42))
-# ])
-
-# Update Truncated SVD (dimensionality reduction)
-text_pipeline = Pipeline([
-    ("tfidf", TfidfVectorizer(max_features=12000, ngram_range=(1,3), stop_words="english")),
-    ("svd", TruncatedSVD(n_components=170, random_state=42))  # best previous SVD value
-])
 
 numeric_pipeline = Pipeline([
     ("scaler", StandardScaler())
 ])
 
 preprocessor = ColumnTransformer([
-    ("text_pipe", text_pipeline, text_col),
+    # ("text_pipe", text_pipeline, text_col), - removed bc Tf-idf is parallelized separately
     ("num", numeric_pipeline, numeric_cols),
     ("cat", OneHotEncoder(handle_unknown="ignore"), cat_cols)
 ])
 
 # Define stacking classifier
-base_lr = LogisticRegression(solver="saga", penalty="l2", class_weight="balanced", max_iter=3000, C=0.1596, random_state=42)
-base_rf = RandomForestClassifier(n_estimators=114, max_depth=12, class_weight="balanced_subsample", random_state=42)
-base_gb = GradientBoostingClassifier(n_estimators=138, learning_rate=0.2666, max_depth=5, random_state=42)
+base_lr = LogisticRegression(
+    solver="saga", penalty="l2", class_weight="balanced", 
+    max_iter=3000, C=0.1596, random_state=42, n_jobs=-1  # parallel processing
+)
+
+base_rf = RandomForestClassifier(
+    n_estimators=114, max_depth=12, class_weight="balanced_subsample", 
+    random_state=42, n_jobs=-1  # Fully parallel
+)
+
+base_gb = GradientBoostingClassifier(
+    n_estimators=138, learning_rate=0.2666, max_depth=5, random_state=42,
+    subsample=0.8,  # Speeds up training while maintaining performance
+    n_iter_no_change=5  # Stops early if no improvement
+)
 
 stack_ensemble = StackingClassifier(
     estimators=[
@@ -89,9 +131,9 @@ stack_ensemble = StackingClassifier(
     ],
     final_estimator=LogisticRegression(
         solver="saga", penalty="l2", class_weight="balanced", max_iter=3000, 
-        C=0.1596, random_state=42  # switching to saga 
+        C=0.1596, random_state=42, n_jobs=-1  # Use multiple cores
     ),
-    passthrough=True, cv=3, n_jobs=-1, verbose=2
+    passthrough=True, cv=3, n_jobs=-1, verbose=2  # Full parallel execution
 )
 
 # Define final pipeline
@@ -117,8 +159,10 @@ print(f"Macro F1 : {val_f1:.4f}")
 print(f"Accuracy : {val_acc:.4f}")
 print(f"ROC AUC  : {val_auc:.4f}")
 
+# debug
+print(df_test.columns)  # Check available columns before processing
+
 # Fill missing values
-df_test[text_col] = df_test[text_col].fillna("")  # Fill missing text values with empty string
 for col in numeric_cols:
     df_test[col] = df_test[col].fillna(0)  # Fill NaNs in numeric columns with 0
 
